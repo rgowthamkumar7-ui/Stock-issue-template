@@ -415,7 +415,7 @@ export const UserDashboard: React.FC = () => {
                         sales_file_name: file.name,
                         sales_file_path: salesFilePath,
                         template_file_name: currentTemplate.file_name,
-                        output_file_name: currentTemplate.file_name.replace(/\.[^/.]+$/, "") + ".xlsx",
+                        output_file_name: currentTemplate.file_name.replace(/\.[^/.]+$/, "") + ".csv",
                         upload_date: new Date().toISOString(),
                         status: 'processing',
                     })
@@ -549,12 +549,12 @@ export const UserDashboard: React.FC = () => {
                 templateData.workbook,
                 templateData.sheetName,
                 updatedTemplateData,
-                currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".xlsx",
+                currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".csv",
                 templateData.headers
             );
 
             // Upload output file
-            const outputFilePath = `${user!.id}/${Date.now()}_output_${currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".xlsx"}`;
+            const outputFilePath = `${user!.id}/${Date.now()}_output_${currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".csv"}`;
             const { error: outputUploadError } = await supabase.storage
                 .from(STORAGE_BUCKETS.OUTPUT_FILES)
                 .upload(outputFilePath, outputBlob);
@@ -573,7 +573,7 @@ export const UserDashboard: React.FC = () => {
             if (updateError) throw updateError;
 
             // Download file
-            downloadFile(outputBlob, currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".xlsx");
+            downloadFile(outputBlob, currentTemplate!.file_name.replace(/\.[^/.]+$/, "") + ".csv");
 
             setSuccess('File processed and downloaded successfully!');
             setShowDSMapping(false);

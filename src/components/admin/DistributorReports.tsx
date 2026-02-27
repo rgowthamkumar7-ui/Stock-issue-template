@@ -75,23 +75,13 @@ export const DistributorReports: React.FC = () => {
                 }))
             );
 
-            const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, 'Raw Summary');
-
-            // Generate blob
-            const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'binary' });
-            const buf = new ArrayBuffer(wbout.length);
-            const view = new Uint8Array(buf);
-            for (let i = 0; i < wbout.length; i++) {
-                view[i] = wbout.charCodeAt(i) & 0xff;
-            }
-            const blob = new Blob([buf], {
-                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            });
+            // Generate CSV blob
+            const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
+            const blob = new Blob([csvOutput], { type: 'text/csv;charset=utf-8;' });
 
             // Download
             const upload = uploads.find((u) => u.id === selectedUpload);
-            const fileName = `raw_summary_${upload?.sales_file_name || 'report'}.xlsx`;
+            const fileName = `raw_summary_${upload?.sales_file_name?.replace(/\.[^/.]+$/, "") || 'report'}.csv`;
             downloadFile(blob, fileName);
 
             setSuccess('Raw summary downloaded successfully!');
@@ -165,23 +155,13 @@ export const DistributorReports: React.FC = () => {
 
             // Create Excel workbook
             const worksheet = XLSX.utils.json_to_sheet(mappedData);
-            const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, 'Mapped Summary');
-
-            // Generate blob
-            const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'binary' });
-            const buf = new ArrayBuffer(wbout.length);
-            const view = new Uint8Array(buf);
-            for (let i = 0; i < wbout.length; i++) {
-                view[i] = wbout.charCodeAt(i) & 0xff;
-            }
-            const blob = new Blob([buf], {
-                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            });
+            // Generate CSV blob
+            const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
+            const blob = new Blob([csvOutput], { type: 'text/csv;charset=utf-8;' });
 
             // Download
             const upload = uploads.find((u) => u.id === selectedUpload);
-            const fileName = `mapped_summary_${upload?.sales_file_name || 'report'}.xlsx`;
+            const fileName = `mapped_summary_${upload?.sales_file_name?.replace(/\.[^/.]+$/, "") || 'report'}.csv`;
             downloadFile(blob, fileName);
 
             setSuccess('Mapped summary downloaded successfully!');

@@ -296,20 +296,11 @@ export function generateOutputFile(
     const options = headers ? { header: headers } : undefined;
     const newSheet = XLSX.utils.json_to_sheet(updatedData, options);
 
-    // Replace the sheet in the workbook
-    originalWorkbook.Sheets[sheetName] = newSheet;
+    // Generate CSV string
+    const csvOutput = XLSX.utils.sheet_to_csv(newSheet);
 
-    // Write to binary string
-    const wbout = XLSX.write(originalWorkbook, { bookType: 'xlsx', type: 'binary' });
-
-    // Convert to Blob
-    const buf = new ArrayBuffer(wbout.length);
-    const view = new Uint8Array(buf);
-    for (let i = 0; i < wbout.length; i++) {
-        view[i] = wbout.charCodeAt(i) & 0xff;
-    }
-
-    return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    // Return as CSV Blob
+    return new Blob([csvOutput], { type: 'text/csv;charset=utf-8;' });
 }
 
 /**
