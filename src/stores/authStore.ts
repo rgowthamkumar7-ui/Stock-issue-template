@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { supabase } from '../lib/supabase';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { User } from '../lib/types';
 
 interface AuthState {
@@ -37,11 +37,8 @@ export const useAuthStore = create<AuthState>((set) => ({
 
     checkAuth: async () => {
         try {
-            // Check if in demo mode
-            const isDemo = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
-
-            if (isDemo) {
-                // Check sessionStorage for demo user
+            // If Supabase is not configured, fall back to demo/session mode
+            if (!isSupabaseConfigured()) {
                 const storedUser = sessionStorage.getItem('demoUser');
                 if (storedUser) {
                     set({ user: JSON.parse(storedUser), loading: false });
@@ -78,14 +75,11 @@ export const useAuthStore = create<AuthState>((set) => ({
     },
 
     signIn: async (identifier: string, password: string) => {
-        const isDemo = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
-
-        if (isDemo) {
-            // Demo mode authentication
+        if (!isSupabaseConfigured()) {
+            // Demo / offline mode authentication
             const demoUser = DEMO_USERS[identifier.toLowerCase()];
 
             if (demoUser && (password === 'demo' || password === 'admin123' || password === 'user123')) {
-                // Simulate network delay
                 await new Promise(resolve => setTimeout(resolve, 500));
                 set({ user: demoUser });
                 sessionStorage.setItem('demoUser', JSON.stringify(demoUser));
@@ -95,15 +89,33 @@ export const useAuthStore = create<AuthState>((set) => ({
         }
 
         // Real Supabase Authentication
-        const { data, error } = await supabase.auth.signInWithPassword({
-            email: identifier,
-            password: password
-        });
+        let data: Awaited<ReturnType<typeof supabase.auth.signInWithPassword>>['data'];
+        let error: Awaited<ReturnType<typeof supabase.auth.signInWithPassword>>['error'];
 
-        if (error) throw error;
+        try {
+            const result = await supabase.auth.signInWithPassword({
+                email: identifier,
+                password: password,
+            });
+            data = result.data;
+            error = result.error;
+        } catch (networkErr) {
+            // Network-level failure (no internet, CORS, DNS etc.)
+            throw new Error(
+                'Unable to reach the server. Please check your internet connection and try again.'
+            );
+        }
 
-        // Profile will be loaded by onAuthStateChange listener or subsequent fetch
-        // But we fetch it here to be sure
+        if (error) {
+            // Make common Supabase errors more human-readable
+            if (error.message === 'Failed to fetch') {
+                throw new Error(
+                    'Unable to reach the server. Please check your internet connection and try again.'
+                );
+            }
+            throw error;
+        }
+
         if (data.user) {
             const { data: profile, error: profileError } = await supabase
                 .from('users')
@@ -112,8 +124,7 @@ export const useAuthStore = create<AuthState>((set) => ({
                 .single();
 
             if (profileError || !profile) {
-                // Determine role based on specific email if profile doesn't exist yet (though trigger should handle it)
-                // Fallback implementation if trigger fails or delays
+                // Fallback if the DB trigger hasn't created the profile yet
                 const role = identifier === 'gowthamitcgk@gmail.com' ? 'admin' : 'user';
                 const newProfile = {
                     id: data.user.id,
@@ -129,24 +140,33 @@ export const useAuthStore = create<AuthState>((set) => ({
     },
 
     signUp: async (email: string, password: string) => {
-        const isDemo = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
-
-        if (isDemo) {
+        if (!isSupabaseConfigured()) {
             throw new Error('Sign up not available in demo mode');
         }
 
-        const { data, error } = await supabase.auth.signUp({
-            email,
-            password,
-        });
+        let data: Awaited<ReturnType<typeof supabase.auth.signUp>>['data'];
+        let error: Awaited<ReturnType<typeof supabase.auth.signUp>>['error'];
 
-        if (error) throw error;
+        try {
+            const result = await supabase.auth.signUp({ email, password });
+            data = result.data;
+            error = result.error;
+        } catch (networkErr) {
+            throw new Error(
+                'Unable to reach the server. Please check your internet connection and try again.'
+            );
+        }
 
-        // Triggers in Supabase will handle profile creation
-        // We can optionally sign them in immediately if auto-confirm is on
+        if (error) {
+            if (error.message === 'Failed to fetch') {
+                throw new Error(
+                    'Unable to reach the server. Please check your internet connection and try again.'
+                );
+            }
+            throw error;
+        }
+
         if (data.user) {
-            // If email confirmation is required, user won't be signed in yet
-            // Check if session exists
             if (data.session) {
                 set({ user: { id: data.user.id, username: email.split('@')[0], role: 'user', status: 'active' } as User });
             }
@@ -154,9 +174,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     },
 
     signOut: async () => {
-        const isDemo = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
-
-        if (isDemo) {
+        if (!isSupabaseConfigured()) {
             sessionStorage.removeItem('demoUser');
             set({ user: null });
         } else {

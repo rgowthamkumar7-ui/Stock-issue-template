@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import { isSupabaseConfigured } from '../lib/supabase';
 
 export const Login: React.FC = () => {
     const [isLogin, setIsLogin] = useState(true);
@@ -131,14 +132,17 @@ export const Login: React.FC = () => {
                     </div>
                 </div>
 
-                <div className="mt-6 space-y-3">
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                        <p className="text-sm font-semibold text-blue-900 mb-2">Notice</p>
-                        <p className="text-xs text-blue-700">
-                            Integration Mode: {import.meta.env.VITE_SUPABASE_URL?.includes('your-project') ? 'Demo' : 'Production'}
-                        </p>
+                {!isSupabaseConfigured() && (
+                    <div className="mt-6">
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                            <p className="text-sm font-semibold text-amber-900 mb-1">⚠️ Demo Mode</p>
+                            <p className="text-xs text-amber-700">
+                                Running without a live database connection.<br />
+                                Login with <strong>admin / admin123</strong> or <strong>user / user123</strong>.
+                            </p>
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
         </div>
     );
