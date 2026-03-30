@@ -3,7 +3,11 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { Login } from './pages/Login';
+import { PortalSelection } from './pages/PortalSelection';
 import { UserDashboard } from './pages/UserDashboard';
+import { MDODashboard } from './pages/MDODashboard';
+import { QCommerceDashboard } from './pages/QCommerceDashboard';
+import { ManagerDashboard } from './pages/ManagerDashboard';
 import { AdminDashboard } from './pages/AdminDashboard';
 
 function App() {
@@ -15,10 +19,13 @@ function App() {
 
     if (loading) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-50 via-slate-50 to-primary-100">
+            <div className="min-h-screen flex items-center justify-center bg-slate-900">
                 <div className="text-center">
-                    <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-600 mx-auto mb-4"></div>
-                    <p className="text-slate-600">Loading...</p>
+                    <div className="text-4xl font-black bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent mb-4">
+                        LeanX
+                    </div>
+                    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-amber-400 mx-auto mb-3"></div>
+                    <p className="text-slate-400 text-sm">Loading Distributor Central...</p>
                 </div>
             </div>
         );
@@ -27,8 +34,20 @@ function App() {
     return (
         <BrowserRouter>
             <Routes>
+                {/* Public */}
                 <Route path="/login" element={<Login />} />
 
+                {/* Portal Selection (Home) */}
+                <Route
+                    path="/home"
+                    element={
+                        <ProtectedRoute>
+                            <PortalSelection />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Stock Issue Portal */}
                 <Route
                     path="/dashboard"
                     element={
@@ -38,6 +57,37 @@ function App() {
                     }
                 />
 
+                {/* MDO – Place Delivery Order */}
+                <Route
+                    path="/mdo"
+                    element={
+                        <ProtectedRoute>
+                            <MDODashboard />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Q-Commerce Dashboard */}
+                <Route
+                    path="/qcommerce"
+                    element={
+                        <ProtectedRoute>
+                            <QCommerceDashboard />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Manager */}
+                <Route
+                    path="/manager-home"
+                    element={
+                        <ProtectedRoute requireManager>
+                            <ManagerDashboard />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Admin */}
                 <Route
                     path="/admin"
                     element={
@@ -47,11 +97,19 @@ function App() {
                     }
                 />
 
+                {/* Default redirect */}
                 <Route
                     path="/"
                     element={
                         user ? (
-                            <Navigate to={user.role === 'admin' ? '/admin' : '/dashboard'} replace />
+                            <Navigate
+                                to={
+                                    user.role === 'admin' ? '/admin'
+                                        : user.role === 'manager' ? '/manager-home'
+                                            : '/home'
+                                }
+                                replace
+                            />
                         ) : (
                             <Navigate to="/login" replace />
                         )

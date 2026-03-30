@@ -16,37 +16,16 @@ export const SKUMappingManager: React.FC = () => {
     const [showAddModal, setShowAddModal] = useState(false);
     const [newSKU, setNewSKU] = useState({ market_sku: '', variant_description: '' });
 
-    const isDemoMode = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
-
-    useEffect(() => {
-        loadSKUMappings();
-    }, []);
-
     const loadSKUMappings = async () => {
         setLoading(true);
         try {
-            if (isDemoMode) {
-                const { DEMO_SKU_MAPPINGS } = await import('../../lib/demoData');
-                // Simulate fetch delay
-                await new Promise(resolve => setTimeout(resolve, 500));
+            const { data, error } = await supabase
+                .from('sku_mapping')
+                .select('*')
+                .order('market_sku');
 
-                // Merge with any local modifications if we were tracking them in a real app
-                // For demo, we just reset or load initial
-                const stored = sessionStorage.getItem('demoSKUMappings');
-                if (stored) {
-                    setSkuMappings(JSON.parse(stored));
-                } else {
-                    setSkuMappings(DEMO_SKU_MAPPINGS);
-                }
-            } else {
-                const { data, error } = await supabase
-                    .from('sku_mapping')
-                    .select('*')
-                    .order('market_sku');
-
-                if (error) throw error;
-                setSkuMappings(data as SKUMapping[] || []);
-            }
+            if (error) throw error;
+            setSkuMappings(data as SKUMapping[] || []);
         } catch (err) {
             console.error('Error loading mappings:', err);
             setError('Failed to load SKU mappings');
@@ -68,13 +47,7 @@ export const SKUMappingManager: React.FC = () => {
 
             const newMappings: Omit<SKUMapping, 'id' | 'created_at'>[] = [];
 
-            // Expected columns: "Market SKU" and "Variant Description"
-            // Adjust based on your actual Excel structure. Assuming simple headers.
-            // If headers are different, mapping logic needs adjustment.
-            // Based on earlier context, user uploads "MSKU Mapping".
-
             jsonData.forEach((row: any) => {
-                // Try to find columns case-insensitively or by likely names
                 const msku = row['Market SKU'] || row['market_sku'] || row['MSKU'] || row['sku'];
                 const desc = row['Variant Description'] || row['variant_description'] || row['Description'] || row['desc'];
 
@@ -90,54 +63,20 @@ export const SKUMappingManager: React.FC = () => {
                 throw new Error('No valid mappings found in Excel. Please check columns "Market SKU" and "Variant Description".');
             }
 
-            if (isDemoMode) {
-                // In demo, we simulate full replace or append? 
-                // Let's replace for simplicity in bulk upload
-                const demoMappings = newMappings.map(m => ({
-                    ...m,
-                    id: Math.random().toString(),
-                    created_at: new Date().toISOString()
-                }));
-                setSkuMappings(demoMappings as SKUMapping[]);
-                sessionStorage.setItem('demoSKUMappings', JSON.stringify(demoMappings));
-                setSuccessMessage(`Successfully uploaded ${demoMappings.length} mappings (Demo Mode)`);
-            } else {
-                // Production: Insert into Supabase
-                // Strategy: Upsert based on market_sku? Or Delete All & Insert?
-                // User said "stored to the database and stay constant until edited".
-                // Bulk upload usually implies "Update everything".
-                // Safest is Upsert if unique constraint on market_sku exists.
-                // Currently `sku_mapping` table doesn't enforce UNIQUE on market_sku in schema (only index).
-                // Schema: `market_sku TEXT NOT NULL`.
-                // I should probably DELETE ALL and INSERT if it's a "Upload Mapping" file appearing to be a master list.
+            const confirmDelete = window.confirm('This will REPLACE existing mappings. Continue?');
+            if (!confirmDelete) return;
 
-                // Let's ask via UI? Or assume Append?
-                // Given "Upload SKU Mapping" suggests providing the master list.
-                // But deleting might break references? No, references are text usually?
-                // `sales_summary` stores `market_sku`. No FK.
+            const { error: deleteError } = await supabase.from('sku_mapping').delete().neq('id', '00000000-0000-0000-0000-000000000000'); // Delete all
+            if (deleteError) throw deleteError;
 
-                // I will use Upsert if possible, or Insert.
-                // Supabase upsert requires unique constraint.
+            const { error: insertError } = await supabase
+                .from('sku_mapping')
+                .insert(newMappings);
 
-                // Let's go with Insert, but maybe clear old ones?
-                // Risky. Let's just Insert and let user manage duplicates or better yet, check for existing.
+            if (insertError) throw insertError;
 
-                // Better: Delete existing mappings?
-                const confirmDelete = window.confirm('This will REPLACE existing mappings. Continue?');
-                if (!confirmDelete) return;
-
-                const { error: deleteError } = await supabase.from('sku_mapping').delete().neq('id', '00000000-0000-0000-0000-000000000000'); // Delete all
-                if (deleteError) throw deleteError;
-
-                const { error: insertError } = await supabase
-                    .from('sku_mapping')
-                    .insert(newMappings);
-
-                if (insertError) throw insertError;
-
-                setSuccessMessage(`Successfully updated ${newMappings.length} mappings.`);
-                loadSKUMappings();
-            }
+            setSuccessMessage(`Successfully updated ${newMappings.length} mappings.`);
+            loadSKUMappings();
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -149,24 +88,12 @@ export const SKUMappingManager: React.FC = () => {
         if (!newSKU.market_sku || !newSKU.variant_description) return;
         setLoading(true);
         try {
-            if (isDemoMode) {
-                const newItem: SKUMapping = {
-                    id: Math.random().toString(),
-                    market_sku: newSKU.market_sku,
-                    variant_description: newSKU.variant_description,
-                    created_at: new Date().toISOString()
-                };
-                const updated = [...skuMappings, newItem];
-                setSkuMappings(updated);
-                sessionStorage.setItem('demoSKUMappings', JSON.stringify(updated));
-            } else {
-                const { error } = await supabase
-                    .from('sku_mapping')
-                    .insert([newSKU]);
+            const { error } = await supabase
+                .from('sku_mapping')
+                .insert([newSKU]);
 
-                if (error) throw error;
-                await loadSKUMappings();
-            }
+            if (error) throw error;
+            await loadSKUMappings();
             setShowAddModal(false);
             setNewSKU({ market_sku: '', variant_description: '' });
             setSuccessMessage('SKU added successfully');
@@ -181,19 +108,13 @@ export const SKUMappingManager: React.FC = () => {
         if (!window.confirm('Are you sure you want to delete this mapping?')) return;
         setLoading(true);
         try {
-            if (isDemoMode) {
-                const updated = skuMappings.filter(m => m.id !== id);
-                setSkuMappings(updated);
-                sessionStorage.setItem('demoSKUMappings', JSON.stringify(updated));
-            } else {
-                const { error } = await supabase
-                    .from('sku_mapping')
-                    .delete()
-                    .eq('id', id);
+            const { error } = await supabase
+                .from('sku_mapping')
+                .delete()
+                .eq('id', id);
 
-                if (error) throw error;
-                await loadSKUMappings();
-            }
+            if (error) throw error;
+            await loadSKUMappings();
         } catch (err) {
             setError('Failed to delete SKU');
         } finally {
@@ -205,22 +126,16 @@ export const SKUMappingManager: React.FC = () => {
         if (!editingSKU) return;
         setLoading(true);
         try {
-            if (isDemoMode) {
-                const updated = skuMappings.map(m => m.id === editingSKU.id ? editingSKU : m);
-                setSkuMappings(updated);
-                sessionStorage.setItem('demoSKUMappings', JSON.stringify(updated));
-            } else {
-                const { error } = await supabase
-                    .from('sku_mapping')
-                    .update({
-                        market_sku: editingSKU.market_sku,
-                        variant_description: editingSKU.variant_description
-                    })
-                    .eq('id', editingSKU.id);
+            const { error } = await supabase
+                .from('sku_mapping')
+                .update({
+                    market_sku: editingSKU.market_sku,
+                    variant_description: editingSKU.variant_description
+                })
+                .eq('id', editingSKU.id);
 
-                if (error) throw error;
-                await loadSKUMappings();
-            }
+            if (error) throw error;
+            await loadSKUMappings();
             setEditingSKU(null);
             setSuccessMessage('SKU updated successfully');
         } catch (err) {

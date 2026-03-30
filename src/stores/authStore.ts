@@ -9,27 +9,8 @@ interface AuthState {
     signUp: (email: string, password: string) => Promise<void>;
     signOut: () => Promise<void>;
     checkAuth: () => Promise<void>;
+    updateProfile: (updates: Partial<User>) => Promise<void>;
 }
-
-// Demo users
-const DEMO_USERS: Record<string, User> = {
-    admin: {
-        id: 'demo-admin-id',
-        username: 'admin',
-        role: 'admin',
-        status: 'active',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-    },
-    user: {
-        id: 'demo-user-id',
-        username: 'user',
-        role: 'user',
-        status: 'active',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-    },
-};
 
 export const useAuthStore = create<AuthState>((set) => ({
     user: null,
@@ -37,13 +18,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
     checkAuth: async () => {
         try {
-            // If Supabase is not configured, fall back to demo/session mode
             if (!isSupabaseConfigured()) {
-                const storedUser = sessionStorage.getItem('demoUser');
-                if (storedUser) {
-                    set({ user: JSON.parse(storedUser), loading: false });
-                    return;
-                }
                 set({ user: null, loading: false });
                 return;
             }
@@ -76,16 +51,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
     signIn: async (identifier: string, password: string) => {
         if (!isSupabaseConfigured()) {
-            // Demo / offline mode authentication
-            const demoUser = DEMO_USERS[identifier.toLowerCase()];
-
-            if (demoUser && (password === 'demo' || password === 'admin123' || password === 'user123')) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                set({ user: demoUser });
-                sessionStorage.setItem('demoUser', JSON.stringify(demoUser));
-                return;
-            }
-            throw new Error('Invalid credentials. Try: admin/demo or user/demo');
+            throw new Error('Supabase is not configured.');
         }
 
         // Real Supabase Authentication
@@ -181,5 +147,26 @@ export const useAuthStore = create<AuthState>((set) => ({
             await supabase.auth.signOut();
             set({ user: null });
         }
+    },
+
+    updateProfile: async (updates: Partial<User>) => {
+        const { user } = useAuthStore.getState();
+        if (!user) return;
+
+        const updatedUser = { ...user, ...updates, updated_at: new Date().toISOString() };
+
+        if (!isSupabaseConfigured()) {
+            set({ user: updatedUser });
+            sessionStorage.setItem('demoUser', JSON.stringify(updatedUser));
+            return;
+        }
+
+        const { error } = await supabase
+            .from('users')
+            .update(updates)
+            .eq('id', user.id);
+
+        if (error) throw error;
+        set({ user: updatedUser });
     },
 }));

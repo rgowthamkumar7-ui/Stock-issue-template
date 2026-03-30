@@ -8,8 +8,9 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   username TEXT UNIQUE NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+  role TEXT NOT NULL CHECK (role IN ('admin', 'user', 'manager')),
   status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+  manager_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -102,6 +103,14 @@ CREATE POLICY "Users can view their own data"
   ON users FOR SELECT
   USING (auth.uid() = id);
 
+CREATE POLICY "Managers can view mapped distributors"
+  ON users FOR SELECT
+  USING (manager_id = auth.uid());
+
+CREATE POLICY "Everyone can view managers"
+  ON users FOR SELECT
+  USING (role = 'manager');
+
 CREATE POLICY "Admins can view all users"
   ON users FOR SELECT
   USING (is_admin());
@@ -109,6 +118,10 @@ CREATE POLICY "Admins can view all users"
 CREATE POLICY "Admins can insert users"
   ON users FOR INSERT
   WITH CHECK (is_admin());
+
+CREATE POLICY "Users can update their own data"
+  ON users FOR UPDATE
+  USING (auth.uid() = id);
 
 CREATE POLICY "Admins can update users"
   ON users FOR UPDATE
@@ -260,3 +273,33 @@ CREATE TRIGGER on_auth_user_created
 -- UPDATE public.users SET role = 'admin' WHERE id IN (SELECT id FROM auth.users WHERE email = 'gowthamitcgk@gmail.com');
 -- OR if username trigger worked:
 -- UPDATE public.users SET role = 'admin' WHERE username = 'gowthamitcgk'; -- Replace 'admin' with their username (part before @ in email)
+
+-- RPC: Admin users can securely reset any user password through an RPC without Service Role APIs
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE OR REPLACE FUNCTION admin_reset_password(
+  target_user_id UUID, 
+  new_password TEXT
+) RETURNS void AS $$
+BEGIN
+  -- 1. Ensure the caller is an active admin
+  IF NOT EXISTS (
+    SELECT 1 FROM public.users 
+    WHERE id = auth.uid() 
+      AND role = 'admin' 
+      AND status = 'active'
+  ) THEN
+    RAISE EXCEPTION 'Unauthorized: Only active admins can reset passwords.';
+  END IF;
+
+  -- 2. Update the password hash in the internal auth tables safely
+  UPDATE auth.users
+  SET encrypted_password = crypt(new_password, gen_salt('bf'))
+  WHERE id = target_user_id;
+
+  -- Verify update
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Target user not found.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

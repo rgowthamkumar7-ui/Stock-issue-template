@@ -16,7 +16,9 @@ export const Login: React.FC = () => {
 
     useEffect(() => {
         if (user) {
-            navigate(user.role === 'admin' ? '/admin' : '/dashboard');
+            if (user.role === 'admin') navigate('/admin');
+            else if (user.role === 'manager') navigate('/manager-home');
+            else navigate('/home');
         }
     }, [user, navigate]);
 
@@ -47,10 +49,13 @@ export const Login: React.FC = () => {
             <div className="w-full max-w-md">
                 <div className="card">
                     <div className="text-center mb-8">
-                        <h1 className="text-3xl font-bold bg-gradient-to-r from-primary-600 to-primary-800 bg-clip-text text-transparent mb-2">
-                            Stock Issue Template
-                        </h1>
-                        <p className="text-slate-600">
+                        <div className="mb-3">
+                            <span className="text-5xl font-black bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 bg-clip-text text-transparent tracking-tight">
+                                LeanX
+                            </span>
+                        </div>
+                        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-1">Distributor Central</p>
+                        <p className="text-slate-500 text-sm mt-3">
                             {isLogin ? 'Sign in to your account' : 'Create a new account'}
                         </p>
                     </div>
@@ -58,15 +63,15 @@ export const Login: React.FC = () => {
                     <form onSubmit={handleSubmit} className="space-y-6">
                         <div>
                             <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-2">
-                                Email Address
+                                Username or Email
                             </label>
                             <input
                                 id="email"
-                                type="email"
+                                type="text"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
                                 className="input-field"
-                                placeholder="Enter your email"
+                                placeholder="Enter your username or email"
                                 required
                                 autoFocus
                             />
@@ -138,7 +143,7 @@ export const Login: React.FC = () => {
                             <p className="text-sm font-semibold text-amber-900 mb-1">⚠️ Demo Mode</p>
                             <p className="text-xs text-amber-700">
                                 Running without a live database connection.<br />
-                                Login with <strong>admin / admin123</strong> or <strong>user / user123</strong>.
+                                Login with <strong>admin / admin123</strong>, <strong>user / user123</strong>, or <strong>manager / manager123</strong>.
                             </p>
                         </div>
                     </div>

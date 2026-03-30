@@ -160,20 +160,13 @@ export const UserDashboard: React.FC = () => {
 
     // SKU Mapping Management Functions
     const loadSKUMappings = async () => {
-        const isDemoMode = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
+        const { data, error } = await supabase
+            .from('sku_mapping')
+            .select('*')
+            .order('market_sku', { ascending: true });
 
-        if (isDemoMode) {
-            const { DEMO_SKU_MAPPINGS } = await import('../lib/demoData');
-            setSkuMappings(DEMO_SKU_MAPPINGS);
-        } else {
-            const { data, error } = await supabase
-                .from('sku_mapping')
-                .select('*')
-                .order('market_sku', { ascending: true });
-
-            if (!error && data) {
-                setSkuMappings(data as SKUMapping[]);
-            }
+        if (!error && data) {
+            setSkuMappings(data as SKUMapping[]);
         }
     };
 
@@ -197,36 +190,21 @@ export const UserDashboard: React.FC = () => {
                 throw new Error('Excel must contain "market_sku" and "variant_description" columns');
             }
 
-            const isDemoMode = import.meta.env.VITE_SUPABASE_URL?.includes('your-project');
+            // Production mode: Upload to Supabase
+            const mappings = data.map((row: any) => ({
+                market_sku: String(row.market_sku || '').trim(),
+                variant_description: String(row.variant_description || '').trim(),
+                created_by: user?.id || '',
+            }));
 
-            if (isDemoMode) {
-                // Demo mode: Update local state
-                const newMappings = data.map((row: any, idx: number) => ({
-                    id: `upload_${Date.now()}_${idx}`,
-                    market_sku: String(row.market_sku || '').trim(),
-                    variant_description: String(row.variant_description || '').trim(),
-                    created_at: new Date().toISOString(),
-                    created_by: user?.id || 'demo',
-                }));
-                setSkuMappings(newMappings);
-                setSuccess(`Uploaded ${newMappings.length} SKU mappings successfully!`);
-            } else {
-                // Production mode: Upload to Supabase
-                const mappings = data.map((row: any) => ({
-                    market_sku: String(row.market_sku || '').trim(),
-                    variant_description: String(row.variant_description || '').trim(),
-                    created_by: user?.id || '',
-                }));
+            // Delete existing mappings and insert new ones
+            await supabase.from('sku_mapping').delete().neq('id', '');
+            const { error } = await supabase.from('sku_mapping').insert(mappings);
 
-                // Delete existing mappings and insert new ones
-                await supabase.from('sku_mapping').delete().neq('id', '');
-                const { error } = await supabase.from('sku_mapping').insert(mappings);
+            if (error) throw error;
 
-                if (error) throw error;
-
-                await loadSKUMappings();
-                setSuccess(`Uploaded ${mappings.length} SKU mappings successfully!`);
-            }
+            await loadSKUMappings();
+            setSuccess(`Uploaded ${mappings.length} SKU mappings successfully!`);
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -827,6 +805,68 @@ export const UserDashboard: React.FC = () => {
                                     </p>
                                 </div>
                             )}
+                        </div>
+
+                        {/* WD Information Form */}
+                        <div className="card">
+                            <h3 className="text-lg font-semibold text-slate-800 mb-4">WD Information</h3>
+                            <p className="text-slate-600 mb-4">
+                                Please enter your Distributor (WD) details. This is required for placing orders.
+                            </p>
+                            <form 
+                                onSubmit={async (e) => {
+                                    e.preventDefault();
+                                    const formData = new FormData(e.currentTarget);
+                                    const wd_code = formData.get('wd_code') as string;
+                                    const wd_name = formData.get('wd_name') as string;
+                                    if(wd_code && wd_name) {
+                                        setProcessing(true);
+                                        try {
+                                            await useAuthStore.getState().updateProfile({ wd_code, wd_name });
+                                            setSuccess('WD Information updated successfully');
+                                        } catch (error) {
+                                            setError((error as Error).message);
+                                        } finally {
+                                            setProcessing(false);
+                                        }
+                                    }
+                                }}
+                                className="space-y-4 max-w-md"
+                            >
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                                        WD Code <span className="text-red-500">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        name="wd_code"
+                                        defaultValue={user?.wd_code || ''}
+                                        required
+                                        className="input-field w-full"
+                                        placeholder="e.g. WD-MH-001"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                                        WD Name <span className="text-red-500">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        name="wd_name"
+                                        defaultValue={user?.wd_name || ''}
+                                        required
+                                        className="input-field w-full"
+                                        placeholder="e.g. Rajesh Traders"
+                                    />
+                                </div>
+                                <button
+                                    type="submit"
+                                    disabled={processing}
+                                    className="btn-primary w-full"
+                                >
+                                    {processing ? 'Saving...' : 'Save Details'}
+                                </button>
+                            </form>
                         </div>
 
                         {/* SKU Mapping View (Read Only) */}
