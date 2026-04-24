@@ -7,8 +7,12 @@ import { PortalSelection } from './pages/PortalSelection';
 import { UserDashboard } from './pages/UserDashboard';
 import { MDODashboard } from './pages/MDODashboard';
 import { QCommerceDashboard } from './pages/QCommerceDashboard';
-import { ManagerDashboard } from './pages/ManagerDashboard';
+import { QCommerceMapping } from './pages/QCommerceMapping';
 import { AdminDashboard } from './pages/AdminDashboard';
+import { ManagerAnalyticsSelection } from './pages/ManagerAnalyticsSelection';
+import { ManagerQComView } from './pages/ManagerQComView';
+import { ManagerDashboard } from './pages/ManagerDashboard';
+import { StockIssueCalendar } from './pages/StockIssueCalendar';
 
 function App() {
     const { checkAuth, loading, user } = useAuthStore();
@@ -76,10 +80,50 @@ function App() {
                         </ProtectedRoute>
                     }
                 />
+                
+                {/* Q-Commerce Mapping */}
+                <Route
+                    path="/qcommerce-mapping"
+                    element={
+                        <ProtectedRoute>
+                            <QCommerceMapping />
+                        </ProtectedRoute>
+                    }
+                />
 
                 {/* Manager */}
                 <Route
                     path="/manager-home"
+                    element={
+                        <ProtectedRoute requireManager>
+                            <ManagerAnalyticsSelection />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Manager Analytics - Stock Issue Calendar */}
+                <Route
+                    path="/stock-calendar"
+                    element={
+                        <ProtectedRoute requireManager>
+                            <StockIssueCalendar />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Manager – Q-Commerce analytics (read-only) */}
+                <Route
+                    path="/manager-qcom"
+                    element={
+                        <ProtectedRoute requireManager>
+                            <ManagerQComView />
+                        </ProtectedRoute>
+                    }
+                />
+
+                {/* Manager – MDO dashboard */}
+                <Route
+                    path="/manager-dashboard-mdo"
                     element={
                         <ProtectedRoute requireManager>
                             <ManagerDashboard />

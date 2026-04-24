@@ -1,9 +1,96 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { Layout } from '../components/shared/Layout';
 import { useAuthStore } from '../stores/authStore';
-import { useQCommerceStore } from '../stores/qcommerceStore';
+import { useQCommerceStore, MSKUMapEntry } from '../stores/qcommerceStore';
 import { PurchaseOrder, POStatus, PaymentStatus, POLineItem } from '../lib/types';
+import { useNavigate } from 'react-router-dom';
+
+// --- CSV parser for msku_match_result.csv (SkuDesc, market_sku) ---------------
+const parseMSKUCSV = (text: string): MSKUMapEntry[] => {
+    const lines = text.split(/\r?\n/);
+    if (lines.length < 2) return [];
+    const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+    const skuDescIdx = headers.findIndex(h => h.toLowerCase() === 'skudesc');
+    const marketSkuIdx = headers.findIndex(h => h.toLowerCase() === 'market_sku');
+    if (skuDescIdx === -1 || marketSkuIdx === -1) return [];
+    const result: MSKUMapEntry[] = [];
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const vals: string[] = [];
+        let inQ = false, cur = '';
+        for (let c = 0; c < line.length; c++) {
+            const ch = line[c];
+            if (ch === '"') { inQ = !inQ; }
+            else if (ch === ',' && !inQ) { vals.push(cur); cur = ''; }
+            else { cur += ch; }
+        }
+        vals.push(cur);
+        const skuDesc = (vals[skuDescIdx] ?? '').trim();
+        const marketSku = (vals[marketSkuIdx] ?? '').trim();
+        if (skuDesc) result.push({ skuDesc, marketSku });
+    }
+    return result;
+};
+
+// --- Bill row type from Bill.xlsx (row 11 = headers, data from row 12) --------
+interface BillRow {
+    marketSku: string;
+    itemName: string;
+    invoiceQty: number;
+    total: number;
+}
+
+const parseBillXLSX = (buffer: ArrayBuffer): BillRow[] => {
+    const wb = XLSX.read(buffer, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    // Find header row by looking for 'Market SKU' column
+    let headerRowIdx = -1;
+    let colMarketSku = -1, colItemName = -1, colInvoiceQty = -1, colTotal = -1;
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i] as string[];
+        const mIdx = row.findIndex(c => String(c).trim() === 'Market SKU');
+        if (mIdx !== -1) {
+            headerRowIdx = i;
+            colMarketSku = mIdx;
+            colItemName = row.findIndex(c => String(c).trim() === 'Item Name');
+            colInvoiceQty = row.findIndex(c => String(c).trim() === 'Invoice Qty');
+            colTotal = row.findIndex(c => String(c).trim() === 'Total');
+            break;
+        }
+    }
+    if (headerRowIdx === -1) return [];
+    const result: BillRow[] = [];
+    for (let i = headerRowIdx + 1; i < rows.length; i++) {
+        const r = rows[i];
+        const msku = String(r[colMarketSku] ?? '').trim();
+        if (!msku) continue;
+        result.push({
+            marketSku: msku,
+            itemName: String(r[colItemName] ?? '').trim(),
+            invoiceQty: Number(r[colInvoiceQty]) || 0,
+            total: Number(r[colTotal]) || 0,
+        });
+    }
+    return result;
+};
+
+// Aggregate bill rows by marketSku
+const aggregateBill = (rows: BillRow[]): Map<string, { qty: number; total: number; itemName: string }> => {
+    const map = new Map<string, { qty: number; total: number; itemName: string }>();
+    rows.forEach(r => {
+        const existing = map.get(r.marketSku);
+        if (existing) {
+            existing.qty += r.invoiceQty;
+            existing.total += r.total;
+        } else {
+            map.set(r.marketSku, { qty: r.invoiceQty, total: r.total, itemName: r.itemName });
+        }
+    });
+    return map;
+};
 
 // --- Status helpers ------------------------------------------------------------
 const PO_STATUS_META: Record<POStatus, { label: string; color: string }> = {
@@ -364,8 +451,19 @@ interface POActionModalProps {
     onClose: () => void;
 }
 
+// Fulfilment row built after bill upload + mSKU map matching
+interface FulfilmentRow {
+    skuCode: string;          // PO sku_code (market_sku of PO line)
+    skuName: string;          // PO sku_name
+    orderedQty: number;
+    billedQty: number;        // from bill (matched via mSKU map)
+    billedValue: number;
+    matchedVia: string;       // marketSku used to match
+    matched: boolean;
+}
+
 const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
-    const { purchaseOrders, updateAppointmentDate, confirmDelivery, closePO, updatePOStatus } = useQCommerceStore();
+    const { purchaseOrders, updateAppointmentDate, confirmDelivery, closePO, updatePOStatus, mskuMap, deletePO } = useQCommerceStore();
     const po = purchaseOrders.find((p) => p.id === poId);
 
     const [view, setView] = useState<ActionView>('hub');
@@ -376,6 +474,21 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
         return acc;
     });
     const [apptSuccess, setApptSuccess] = useState(false);
+
+    // Bill upload state
+    const [billFileName, setBillFileName] = useState('');
+    const [billError, setBillError] = useState('');
+    const [fulfilmentRows, setFulfilmentRows] = useState<FulfilmentRow[] | null>(null);
+    const billInputRef = useRef<HTMLInputElement>(null);
+
+    const [pendingMapping, setPendingMapping] = useState<{
+        unmappedPO: POLineItem[];
+        unmappedBillSkus: string[];
+        billMap: Map<string, { qty: number; total: number; itemName: string }>;
+    } | null>(null);
+    const [tempMap, setTempMap] = useState<Record<string, string>>({});
+
+    const { addMSKUMapping } = useQCommerceStore();
 
     if (!po) { onClose(); return null; }
 
@@ -397,8 +510,115 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
         setTimeout(() => { setApptSuccess(false); setView('hub'); }, 1200);
     };
 
+    // Build mSKU lookup: marketSku -> skuDesc
+    const mskuLookup = useMemo(() => {
+        const m = new Map<string, string>();
+        mskuMap.forEach(e => { if (e.marketSku) m.set(e.marketSku, e.skuDesc); });
+        return m;
+    }, [mskuMap]);
+
+    const handleBillUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setBillFileName(file.name);
+        setBillError('');
+        setFulfilmentRows(null);
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const billRows = parseBillXLSX(ev.target?.result as ArrayBuffer);
+                if (billRows.length === 0) { setBillError('Could not find data in the uploaded bill. Check the format.'); return; }
+                const billMap = aggregateBill(billRows);
+                // For each PO line, find matching market_sku in bill
+                // PO sku_code IS the market_sku (as set by Zepto CSV import)
+                const rows: FulfilmentRow[] = [];
+                const unmappedPO: POLineItem[] = [];
+
+                po.line_items.forEach(line => {
+                    const directHit = billMap.get(line.sku_code);
+                    if (directHit) {
+                        rows.push({ skuCode: line.sku_code, skuName: line.sku_name, orderedQty: line.quantity, billedQty: directHit.qty, billedValue: directHit.total, matchedVia: line.sku_code, matched: true });
+                        return;
+                    }
+                    const altEntry = mskuMap.find(e => e.skuDesc.toLowerCase() === line.sku_name.toLowerCase() && e.marketSku);
+                    if (altEntry) {
+                        const altHit = billMap.get(altEntry.marketSku);
+                        if (altHit) {
+                            rows.push({ skuCode: line.sku_code, skuName: line.sku_name, orderedQty: line.quantity, billedQty: altHit.qty, billedValue: altHit.total, matchedVia: altEntry.marketSku, matched: true });
+                            return;
+                        }
+                    }
+                    unmappedPO.push(line);
+                    rows.push({ skuCode: line.sku_code, skuName: line.sku_name, orderedQty: line.quantity, billedQty: 0, billedValue: 0, matchedVia: '—', matched: false });
+                });
+
+                const matchedBillSkus = new Set(rows.filter(r => r.matched).map(r => r.matchedVia));
+                const unmappedBillSkus = Array.from(billMap.keys()).filter(k => !matchedBillSkus.has(k));
+
+                setFulfilmentRows(rows);
+
+                if (unmappedPO.length > 0 && unmappedBillSkus.length > 0) {
+                    setPendingMapping({ unmappedPO, unmappedBillSkus, billMap });
+                    return;
+                }
+
+                // Pre-fill deliveries with billed qty if no mapping needed
+                const newDeliveries: Record<string, number> = {};
+                rows.forEach(r => { newDeliveries[r.skuCode] = r.billedQty; });
+                setDeliveries(newDeliveries);
+            } catch {
+                setBillError('Failed to parse the bill file. Please check the format.');
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+
+    const applyMapping = () => {
+        if (!pendingMapping || !fulfilmentRows) return;
+        let newRows = [...fulfilmentRows];
+        
+        Object.entries(tempMap).forEach(([poSkuCode, billSku]) => {
+            if (billSku) {
+                const poLine = po.line_items.find(l => l.sku_code === poSkuCode);
+                if (poLine) {
+                    addMSKUMapping(poLine.sku_name, billSku);
+                    const billData = pendingMapping.billMap.get(billSku);
+                    if (billData) {
+                        newRows = newRows.map(r => 
+                            r.skuCode === poSkuCode 
+                            ? { ...r, billedQty: billData.qty, billedValue: billData.total, matchedVia: billSku, matched: true }
+                            : r
+                        );
+                    }
+                }
+            }
+        });
+        
+        setFulfilmentRows(newRows);
+        const newDeliveries: Record<string, number> = {};
+        newRows.forEach(r => { newDeliveries[r.skuCode] = r.billedQty; });
+        setDeliveries(newDeliveries);
+        
+        setPendingMapping(null);
+        setTempMap({});
+    };
+
+    const cancelMapping = () => {
+        if (fulfilmentRows) {
+            const newDeliveries: Record<string, number> = {};
+            fulfilmentRows.forEach(r => { newDeliveries[r.skuCode] = r.billedQty; });
+            setDeliveries(newDeliveries);
+        }
+        setPendingMapping(null);
+        setTempMap({});
+    };
+
     const handleDeliverySubmit = () => {
-        confirmDelivery(po.id, deliveries);
+        let exactBillValue: number | undefined = undefined;
+        if (fulfilmentRows) {
+            exactBillValue = fulfilmentRows.reduce((sum, r) => sum + r.billedValue, 0);
+        }
+        confirmDelivery(po.id, deliveries, exactBillValue);
         setView('hub');
     };
 
@@ -433,7 +653,46 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
 
     return (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl my-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl my-4 relative">
+                
+                {/* Mapping Popup */}
+                {pendingMapping && (
+                    <div className="absolute inset-0 z-50 bg-white rounded-3xl p-6 flex flex-col shadow-2xl">
+                        <h3 className="text-xl font-black text-slate-800 mb-2">Map Missing SKUs</h3>
+                        <p className="text-sm text-slate-500 mb-6 font-medium">We found {pendingMapping.unmappedPO.length} PO items that couldn't be matched automatically. Please select the corresponding item from the bill.</p>
+                        
+                        <div className="flex-1 overflow-y-auto space-y-4 pr-2">
+                            {pendingMapping.unmappedPO.map(line => (
+                                <div key={line.sku_code} className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                                    <p className="text-xs font-mono font-bold text-slate-500">{line.sku_code}</p>
+                                    <p className="text-sm font-semibold text-slate-800 mb-3">{line.sku_name}</p>
+                                    <select
+                                        value={tempMap[line.sku_code] || ''}
+                                        onChange={e => setTempMap({...tempMap, [line.sku_code]: e.target.value})}
+                                        className="w-full text-sm border-2 border-indigo-200 rounded-lg px-3 py-2 font-medium focus:ring-2 focus:ring-indigo-300 focus:border-indigo-500 outline-none text-slate-700"
+                                    >
+                                        <option value="">-- Do not map (leave unfulfilled) --</option>
+                                        {pendingMapping.unmappedBillSkus.map(bsku => {
+                                            const item = pendingMapping.billMap.get(bsku);
+                                            return (
+                                                <option key={bsku} value={bsku}>{bsku} - {item?.itemName} ({item?.qty} units)</option>
+                                            );
+                                        })}
+                                    </select>
+                                </div>
+                            ))}
+                        </div>
+                        
+                        <div className="flex gap-3 pt-6 mt-auto border-t border-slate-100">
+                            <button onClick={applyMapping} className="flex-1 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-colors">
+                                Save Mapping & Continue
+                            </button>
+                            <button onClick={cancelMapping} className="px-6 py-3 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50">
+                                Skip
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {/* -- HUB VIEW -- */}
                 {view === 'hub' && (
@@ -573,6 +832,25 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
                                         </div>
                                     </button>
                                 )}
+
+                                {/* Delete PO — always available */}
+                                <button
+                                    onClick={() => {
+                                        if (window.confirm('Are you sure you want to permanently delete this PO? This cannot be undone and it will be removed from all calculations.')) {
+                                            deletePO(po.id);
+                                            onClose();
+                                        }
+                                    }}
+                                    className="w-full flex items-center gap-4 px-5 py-4 rounded-2xl border-2 border-red-100 hover:border-red-500 hover:bg-red-50 transition-all group"
+                                >
+                                    <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center group-hover:bg-red-500 transition-colors">
+                                        <svg className="w-5 h-5 text-red-500 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                    </div>
+                                    <div className="text-left">
+                                        <p className="text-sm font-bold text-red-700">Delete Permanently</p>
+                                        <p className="text-xs text-slate-500">Remove this PO entirely from all records and calculations</p>
+                                    </div>
+                                </button>
                             </div>
 
                             <div className="flex justify-end pt-1">
@@ -726,42 +1004,150 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
                     <>
                         <Header title="Mark as Delivered" subtitle={po.po_number} onBack={() => setView('hub')} />
                         <div className="p-6 space-y-4">
-                            <p className="text-sm text-slate-600 font-medium">Enter the quantity actually delivered for each SKU line:</p>
-                            <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
-                                {po.line_items.map((l) => (
-                                    <div key={l.sku_code} className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex items-center gap-4">
-                                        <div className="flex-1 min-w-0">
-                                            <p className="text-xs font-mono text-amber-600 font-bold">{l.sku_code}</p>
-                                            <p className="text-sm font-bold text-slate-800 truncate">{l.sku_name}</p>
-                                            <p className="text-xs text-slate-500 font-medium mt-0.5">Ordered: {l.quantity} units @ {fmt(l.unit_price)}</p>
-                                        </div>
-                                        <div className="w-36 shrink-0">
-                                            <label className="text-[10px] font-bold text-amber-700 uppercase tracking-wide">Delivered Qty</label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max={l.quantity}
-                                                value={deliveries[l.sku_code] ?? 0}
-                                                onChange={(e) => setDeliveries({ ...deliveries, [l.sku_code]: parseInt(e.target.value) || 0 })}
-                                                className="w-full px-3 py-2 border-2 border-amber-300 rounded-lg text-sm font-bold text-amber-900 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-300 mt-1"
-                                            />
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                            {/* Delivery total preview */}
-                            <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 flex items-center justify-between">
-                                <p className="text-sm font-bold text-green-800">Total Delivered Value</p>
-                                <p className="text-sm font-black text-green-700">
-                                    {fmt(po.line_items.reduce((sum, l) => sum + (deliveries[l.sku_code] ?? 0) * l.unit_price, 0))}
+                            {/* Step 1 – Upload Bill */}
+                            <div className="border-2 border-dashed border-amber-200 rounded-2xl p-4 bg-amber-50 flex flex-col items-center gap-2 text-center">
+                                <svg className="w-8 h-8 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p className="text-sm font-bold text-amber-800">Upload Sales Bill (Excel)</p>
+                                <p className="text-xs text-amber-600 max-w-xs leading-relaxed">
+                                    Upload the <strong>Bill.xlsx</strong> — must have columns: <span className="font-mono">Market SKU, Invoice Qty, Total</span>.<br/>
+                                    Quantities will be matched against the PO using the mSKU map.
                                 </p>
+                                <label className="cursor-pointer mt-1">
+                                    <input ref={billInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleBillUpload} />
+                                    <span className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-bold hover:bg-amber-700 transition-colors">
+                                        Browse Bill File
+                                    </span>
+                                </label>
+                                {billFileName && <p className="text-xs text-green-700 font-semibold">✓ {billFileName} loaded</p>}
                             </div>
+
+                            {billError && (
+                                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{billError}</div>
+                            )}
+
+                            {mskuMap.length === 0 && (
+                                <div className="flex items-start gap-2 bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-xs text-yellow-800">
+                                    <svg className="w-4 h-4 mt-0.5 shrink-0 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    <span><strong>mSKU map not loaded.</strong> Upload the mSKU map in the <em>SKU Mapping</em> section first for best matching accuracy.</span>
+                                </div>
+                            )}
+
+                            {/* Step 2 – Fulfilment table (shown after bill upload) */}
+                            {fulfilmentRows && (
+                                <div className="space-y-3">
+                                    <p className="text-sm font-bold text-slate-700">SKU Fulfilment Summary — review and adjust if needed:</p>
+                                    <div className="overflow-x-auto rounded-xl border border-slate-200">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="bg-slate-50 border-b border-slate-200">
+                                                    <th className="px-3 py-2 text-left font-bold text-slate-500 uppercase tracking-wide">SKU</th>
+                                                    <th className="px-3 py-2 text-right font-bold text-indigo-600 uppercase tracking-wide bg-indigo-50/40">Ordered</th>
+                                                    <th className="px-3 py-2 text-right font-bold text-amber-700 uppercase tracking-wide bg-amber-50/40">Invoice Qty</th>
+                                                    <th className="px-3 py-2 text-right font-bold text-green-700 uppercase tracking-wide bg-green-50/40">Fill %</th>
+                                                    <th className="px-3 py-2 text-right font-bold text-slate-500 uppercase tracking-wide">Invoice Val</th>
+                                                    <th className="px-3 py-2 text-center font-bold text-slate-500 uppercase tracking-wide">Match</th>
+                                                    <th className="px-3 py-2 text-right font-bold text-violet-600 uppercase tracking-wide bg-violet-50/40">Confirm Qty</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {fulfilmentRows.map((row) => {
+                                                    const fillPct = row.orderedQty > 0 ? Math.round((row.billedQty / row.orderedQty) * 100) : 0;
+                                                    const fillColor = fillPct >= 90 ? 'text-green-700' : fillPct >= 50 ? 'text-amber-700' : 'text-red-600';
+                                                    return (
+                                                        <tr key={row.skuCode} className={`hover:bg-slate-50 transition-colors ${!row.matched ? 'bg-red-50/30' : ''}`}>
+                                                            <td className="px-3 py-2">
+                                                                <p className="font-mono font-bold text-slate-500">{row.skuCode}</p>
+                                                                <p className="text-slate-700 font-semibold truncate max-w-[160px]">{row.skuName}</p>
+                                                            </td>
+                                                            <td className="px-3 py-2 text-right font-black text-indigo-700 bg-indigo-50/20">{row.orderedQty}</td>
+                                                            <td className="px-3 py-2 text-right font-black text-amber-700 bg-amber-50/20">{row.billedQty}</td>
+                                                            <td className={`px-3 py-2 text-right font-black bg-green-50/20 ${fillColor}`}>{fillPct}%</td>
+                                                            <td className="px-3 py-2 text-right text-slate-600 font-semibold">{fmt(row.billedValue)}</td>
+                                                            <td className="px-3 py-2 text-center">
+                                                                {row.matched ? (
+                                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-bold text-[10px]">✓ {row.matchedVia}</span>
+                                                                ) : (
+                                                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-100 text-red-600 font-bold text-[10px]">No match</span>
+                                                                )}
+                                                            </td>
+                                                            <td className="px-3 py-2 bg-violet-50/20">
+                                                                <input
+                                                                    type="number"
+                                                                    min="0"
+                                                                    value={deliveries[row.skuCode] ?? row.billedQty}
+                                                                    onChange={(e) => setDeliveries({ ...deliveries, [row.skuCode]: parseFloat(e.target.value) || 0 })}
+                                                                    className="w-20 ml-auto block px-2 py-1 border-2 border-violet-300 rounded-lg text-xs font-bold text-violet-900 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-300"
+                                                                />
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                            <tfoot>
+                                                <tr className="border-t-2 border-slate-200 bg-slate-50">
+                                                    <td className="px-3 py-2 font-bold text-slate-700 text-xs">Total</td>
+                                                    <td className="px-3 py-2 text-right font-black text-indigo-700 bg-indigo-50/30">{fulfilmentRows.reduce((s, r) => s + r.orderedQty, 0)}</td>
+                                                    <td className="px-3 py-2 text-right font-black text-amber-700 bg-amber-50/30">{fulfilmentRows.reduce((s, r) => s + r.billedQty, 0)}</td>
+                                                    <td className="px-3 py-2 text-right font-black text-green-700 bg-green-50/30">
+                                                        {(() => { const o = fulfilmentRows.reduce((s, r) => s + r.orderedQty, 0); const b = fulfilmentRows.reduce((s, r) => s + r.billedQty, 0); return o > 0 ? Math.round((b / o) * 100) + '%' : '—'; })()}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right font-black text-slate-700">{fmt(fulfilmentRows.reduce((s, r) => s + r.billedValue, 0))}</td>
+                                                    <td></td>
+                                                    <td className="px-3 py-2 text-right font-black text-violet-700 bg-violet-50/30">{Object.values(deliveries).reduce((s, v) => s + v, 0)}</td>
+                                                </tr>
+                                            </tfoot>
+                                        </table>
+                                    </div>
+                                    <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 flex items-center justify-between">
+                                        <p className="text-sm font-bold text-green-800">Confirmed Delivered Value</p>
+                                        <p className="text-sm font-black text-green-700">
+                                            {fmt(po.line_items.reduce((sum, l) => sum + (deliveries[l.sku_code] ?? 0) * l.unit_price, 0))}
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Fallback manual entry (when no bill uploaded) */}
+                            {!fulfilmentRows && (
+                                <div className="space-y-3 max-h-[35vh] overflow-y-auto pr-1">
+                                    {po.line_items.map((l) => (
+                                        <div key={l.sku_code} className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex items-center gap-4">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-xs font-mono text-amber-600 font-bold">{l.sku_code}</p>
+                                                <p className="text-sm font-bold text-slate-800 truncate">{l.sku_name}</p>
+                                                <p className="text-xs text-slate-500 font-medium mt-0.5">Ordered: {l.quantity} units @ {fmt(l.unit_price)}</p>
+                                            </div>
+                                            <div className="w-36 shrink-0">
+                                                <label className="text-[10px] font-bold text-amber-700 uppercase tracking-wide">Delivered Qty</label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max={l.quantity}
+                                                    value={deliveries[l.sku_code] ?? 0}
+                                                    onChange={(e) => setDeliveries({ ...deliveries, [l.sku_code]: parseInt(e.target.value) || 0 })}
+                                                    className="w-full px-3 py-2 border-2 border-amber-300 rounded-lg text-sm font-bold text-amber-900 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-300 mt-1"
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                    <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 flex items-center justify-between">
+                                        <p className="text-sm font-bold text-green-800">Total Delivered Value</p>
+                                        <p className="text-sm font-black text-green-700">
+                                            {fmt(po.line_items.reduce((sum, l) => sum + (deliveries[l.sku_code] ?? 0) * l.unit_price, 0))}
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="flex gap-3 pt-1">
                                 <button
                                     onClick={handleDeliverySubmit}
-                                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 text-white font-bold shadow-md shadow-amber-200 hover:scale-[1.02] transition-all"
+                                    disabled={!fulfilmentRows && po.line_items.every(l => !deliveries[l.sku_code])}
+                                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 text-white font-bold shadow-md shadow-amber-200 hover:scale-[1.02] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
-                                    Confirm Delivery
+                                    ✓ Confirm Delivery
                                 </button>
                                 <button onClick={() => setView('hub')} className="py-3 px-5 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 transition-colors">
                                     Cancel
@@ -775,8 +1161,11 @@ const POActionModal: React.FC<POActionModalProps> = ({ poId, onClose }) => {
     );
 };
 
+
+
 // --- Main Page -----------------------------------------------------------------
 export const QCommerceDashboard: React.FC = () => {
+    const navigate = useNavigate();
     const { user } = useAuthStore();
     const {
         purchaseOrders,
@@ -786,11 +1175,45 @@ export const QCommerceDashboard: React.FC = () => {
         updateAppointmentDate,
         confirmDelivery,
         closePO,
+        mskuMap,
+        mskuMapFileName,
+        setMSKUMap,
+        clearMSKUMap,
     } = useQCommerceStore();
     const [showUpload, setShowUpload] = useState(false);
     const [selectedPO, setSelectedPO] = useState<string | null>(null);
     const [statusFilter, setStatusFilter] = useState<POStatus | 'all'>('all');
     const [search, setSearch] = useState('');
+    // SKU Mapping section state
+    const [mskuUploadError, setMskuUploadError] = useState('');
+    const [mskuUploading, setMskuUploading] = useState(false);
+    const [showMskuTable, setShowMskuTable] = useState(false);
+
+    const handleMSKUUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setMskuUploadError('');
+        setMskuUploading(true);
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const entries = parseMSKUCSV(ev.target?.result as string);
+                if (entries.length === 0) {
+                    setMskuUploadError('No valid rows found. Ensure the file has SkuDesc and market_sku columns.');
+                } else {
+                    setMSKUMap(entries, file.name);
+                    setShowMskuTable(true);
+                }
+            } catch {
+                setMskuUploadError('Failed to parse the CSV. Please check the file format.');
+            }
+            setMskuUploading(false);
+        };
+        reader.readAsText(file);
+        // Reset input so same file can be re-uploaded
+        e.target.value = '';
+    };
+
 
     const filteredPOs = useMemo(() => {
         return purchaseOrders.filter((po) => {
@@ -841,16 +1264,27 @@ export const QCommerceDashboard: React.FC = () => {
                         </div>
                         <p className="text-slate-500 ml-12">Purchase Orders · Overall Fill Rate: <strong className="text-violet-600">{fillRate}</strong></p>
                     </div>
-                    <button
-                        id="btn-new-po"
-                        onClick={() => setShowUpload(true)}
-                        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-700 text-white font-bold shadow-lg shadow-violet-200 hover:shadow-xl hover:shadow-violet-300 hover:scale-105 transition-all duration-200"
-                    >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                        New PO
-                    </button>
+                    <div className="flex gap-3">
+                        <button
+                            onClick={() => navigate('/qcommerce-mapping')}
+                            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 font-bold shadow-sm hover:bg-slate-50 transition-all duration-200"
+                        >
+                            <svg className="w-5 h-5 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                            </svg>
+                            SKU Mapping
+                        </button>
+                        <button
+                            id="btn-new-po"
+                            onClick={() => setShowUpload(true)}
+                            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-700 text-white font-bold shadow-lg shadow-violet-200 hover:shadow-xl hover:shadow-violet-300 hover:scale-105 transition-all duration-200"
+                        >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                            New PO
+                        </button>
+                    </div>
                 </div>
 
                 {/* KPI Cards */}
@@ -909,7 +1343,7 @@ export const QCommerceDashboard: React.FC = () => {
                         <table className="w-full">
                             <thead>
                                 <tr className="bg-slate-50">
-                                    {['PO Number', 'Supplier / Platform', 'PO Date', 'Expiry', 'Appointment', 'PO Amount', 'Ord Qty', 'Del Qty', 'PO Status', 'Payment'].map((h) => (
+                                    {['PO Number', 'Supplier / Platform', 'PO Date', 'Expiry', 'Appointment', 'PO Amount', 'Delivered Amount', 'Ord Qty', 'Del Qty', 'PO Status', 'Payment'].map((h) => (
                                         <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
                                     ))}
                                 </tr>
@@ -917,7 +1351,7 @@ export const QCommerceDashboard: React.FC = () => {
                             <tbody className="divide-y divide-slate-100">
                                 {filteredPOs.length === 0 ? (
                                     <tr>
-                                        <td colSpan={10} className="py-14 text-center text-slate-400">
+                                        <td colSpan={11} className="py-14 text-center text-slate-400">
                                             <p className="font-medium">No purchase orders found</p>
                                         </td>
                                     </tr>
@@ -941,9 +1375,9 @@ export const QCommerceDashboard: React.FC = () => {
                                                 <td className="px-4 py-3 text-sm text-slate-500 whitespace-nowrap font-medium">{fdate(po.planned_appointment_date) || <span className="text-slate-300">—</span>}</td>
                                                 <td className="px-4 py-3 text-sm font-black text-slate-800 whitespace-nowrap">
                                                     {fmt(po.po_amount)}
-                                                    {hasDelivery && po.delivered_amount !== undefined && (
-                                                        <div className="text-[10px] text-green-600 font-semibold">Del: {fmt(po.delivered_amount)}</div>
-                                                    )}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm font-black text-green-700 whitespace-nowrap bg-green-50/10">
+                                                    {hasDelivery && po.delivered_amount !== undefined ? fmt(po.delivered_amount) : <span className="text-slate-300 font-normal">—</span>}
                                                 </td>
                                                 <td className="px-4 py-3 text-center font-black text-indigo-700 bg-indigo-50/20 text-sm">
                                                     {ordQty}
